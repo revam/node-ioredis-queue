@@ -1,0 +1,13 @@
+language: node_js
+node_js:
+  - "node"
+  - "9"
+  - "8"
+sudo: false
+dist: trusty
+install: npm ci
+before_install:
+  - npm i -g npm
+cache:
+  directories:
+    - "node_modules"
