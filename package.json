@@ -31,6 +31,7 @@
   },
   "homepage": "https://github.com/revam/node-ioredis-queue#readme",
   "devDependencies": {
+    "@types/ioredis": "^3.2.5",
     "@types/jest": "^22.0.0",
     "@types/node": "^8.5.2",
     "del-cli": "^1.1.0",
@@ -40,6 +41,10 @@
     "typescript": "^2.7.2"
   },
   "dependencies": {
+    "bson-objectid": "^1.2.2",
+    "ioredis": "^3.2.2",
+    "is-iterable": "^1.1.1",
+    "micro-signals": "^2.0.0"
   },
   "jest": {
     "transform": {
