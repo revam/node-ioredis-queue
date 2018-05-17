@@ -80,6 +80,7 @@ export class Flow {
     ]).then(async([redis, sub]) => {
       this._redis = redis;
       this._sub = sub;
+      delete this._ready;
 
       sub.on('message', (channel, message) => this._handles.get(channel)(message));
 
@@ -91,9 +92,6 @@ export class Flow {
         ['stats', (message) => this.handleStats(message)],
         ['implemented', (message) => this.handleImplemented(message)],
       );
-
-      // Remove self
-      delete this._ready;
     });
 
     this.maxsize = maxsize;
@@ -103,7 +101,7 @@ export class Flow {
     this._queue = [];
     this._ready = promise;
     this._pause = !flowing;
-    this._active = undefined;
+    this._active = new Set();
     this._responses = new Map();
     this._implements = new Map();
   }
@@ -481,6 +479,10 @@ export class Flow {
    * @returns Message received by client(-s).
    */
   public async publish(channel: string, message: string): Promise<boolean> {
+    // Wait for connection if not ready
+    if (this._ready) {
+      await this._ready;
+    }
     return 0 < await this._redis.publish(channel, message);
   }
 
@@ -501,6 +503,11 @@ export class Flow {
       this._handles = handles;
     } else {
       handles.forEach((v, k) => this._handles.set(k, v));
+    }
+
+    // Wait for connection if not ready
+    if (this._ready) {
+      await this._ready;
     }
 
     return this._handles.size <= await this._sub.subscribe(...handles.keys());
@@ -620,11 +627,11 @@ export class Flow {
     await multi.publish('response', payload).exec();
 
     async function dispatch(index: number) {
-      if (index <= count) {
-        throw new Error('next() called multiple times');
+      if (index < count) {
+        throw new Error('next() called multiple times in registered flow handle');
       }
 
-      count = index;
+      count = index + 1;
 
       if (index >= length) {
         return;
@@ -647,7 +654,7 @@ export class Flow {
     this._responses.delete(id);
 
     // Try parse message
-    if (error) {
+    if (error !== undefined) {
       if (!error.length) {
         handler();
       } else {
@@ -657,12 +664,11 @@ export class Flow {
       }
     } else {
       try {
-        const [message]: [string] = await this._redis.multi()
+        const [[, message]]: [[null, string]] = await this._redis.multi()
           .get(this.prefixId(id))
           .del(this.prefixId(id))
           .exec()
         ;
-
         const data = JSON.parse(message);
 
         handler(null, data);
