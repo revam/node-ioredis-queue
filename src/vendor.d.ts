@@ -4,10 +4,10 @@ declare module "bson-objectid" {
   export interface ObjectID {
     toHexString(): string;
     getTimestamp(): Date;
-    equals<T = ObjectID>(any: T): boolean;
+    equals(otherOID: ObjectID | string): boolean;
   }
   export function generate(time?: number): string;
-  export function createFromHexString(string: string): ObjectID;
+  export function createFromHexString<T>(oid: string): ObjectID;
 }
 
 declare module "is-iterable" {

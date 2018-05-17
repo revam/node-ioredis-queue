@@ -1,17 +1,13 @@
 {
   "name": "ioredis-queue",
   "version": "1.0.0",
+  "private": true,
   "description": "Simple redis queue system",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "scripts": {
-    "lint": "tsc --noEmit -p . && tslint src/**/*.ts",
-    "test": "jest",
-    "build": "tsc -p .",
-    "pretest": "npm run lint",
-    "prebuild": "npm run test",
-    "prepublish": "npm run build",
-    "postpublish": "del-cli lib"
+    "test": "tslint test/**/*.ts && jest",
+    "build": "tsc --noEmit -p . && tslint src/**/*.ts && tsc -p ."
   },
   "repository": {
     "type": "git",
