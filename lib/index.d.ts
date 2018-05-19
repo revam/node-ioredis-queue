@@ -1,43 +1,71 @@
 import { Signal } from "micro-signals";
 export declare class Flow {
     /**
+     * Currently processing [number] queues.
+     */
+    readonly hasActiveQueues: number;
+    /**
      * Default timeout for async methods
      */
-    readonly timeout: number;
+    readonly hasTimeout: number;
     /**
-     * Max size for packed requests
+     * Max size for packed requests.
      */
-    readonly maxsize: number;
+    readonly hasMaxPacketSize: number;
     /**
-     * Max concurring queues. May be reconfigurred
+     * Max concurring queues.
      */
-    concurrency: number;
+    readonly hasConcurrency: number;
     /**
-     * Silenced errors land here.
+     * Dispatched if any errors occurr.
      */
-    onError: Signal<Error>;
-    private _implements;
-    private _responses;
-    private _handles;
-    private _active;
-    private _queue;
-    private _redis;
-    private _sub;
-    private _ready?;
-    private _pause?;
-    constructor(options?: Options);
+    readonly onError: Signal<any>;
     /**
-     * Currently proccessing request queues
+     * Dispatched when flow is paused.
      */
-    readonly active: boolean;
+    readonly onPause: Signal<void>;
     /**
-     * Currently proccessing x request queues
+     * Dispatched when redis is connected.
      */
-    readonly activeSize: number;
+    readonly onReady: Signal<void>;
     /**
-     * Check if flowing mode is enabled.
+     * Dispatched when flow is resumed.
      */
-    readonly flowing: boolean;
+    readonly onResume: Signal<void>;
+    /**
+     * Dispatched when redis connection is closing.
+     */
+    readonly onQuit: Signal<void>;
+    /**
+     * Indicates that requests are currently being processed.
+     */
+    readonly isActive: boolean;
+    /**
+     * Inidates that the instance is in a paused state.
+     */
+    readonly isPaused: boolean;
+    /**
+     * Indicates that the instance is ready for use.
+     */
+    readonly isReady: boolean;
+    private __registered;
+    private __responses;
+    private __handles;
+    private __active;
+    private __queue;
+    private __redis;
+    private __sub;
+    private __concurrency;
+    private __ready;
+    private __readyPromise?;
+    private __pause;
+    private __pausePromise?;
+    constructor(options?: IFlowOptions);
+    /**
+     * Change max concurring queue processing.
+     * @param value New value
+     */
+    concurrency(value: number): this;
     /**
      * Register a single queue middleware.
      *
@@ -96,8 +124,9 @@ export declare class Flow {
      *
      * @param name
      */
-    stats(name: string): Promise<Stats>;
-    stats(name: string, timeout: number): Promise<Stats>;
+    stats(name: string): Promise<IFlowStats>;
+    stats(name: string, timeout: number): Promise<IFlowStats>;
+    createQueue<T, U>(name: string): Queue<{}, {}>;
     /**
      * Wait till instance is connected and ready for use.
      *
@@ -138,14 +167,21 @@ export declare class Flow {
     /**
      * Process requests in an async series till stack is empty
      */
-    private handleRequest<T, U>(handle);
+    private handleRequest<T, U>(handle?);
     private parseQueueData<T, U>(queue, data);
     private handleResponse(payload);
     private handleAdvertisement(id);
     private handleStats(payload?);
     private handleImplemented(payload?);
 }
-export interface Options {
+export declare class Queue<T, U> {
+    readonly name: string;
+    readonly parent: Flow;
+    constructor(name: string, parent: Flow);
+    pop(): Promise<boolean>;
+    push(value?: T): Promise<U>;
+}
+export interface IFlowOptions {
     uri?: string;
     prefix?: string;
     maxsize?: number;
@@ -153,7 +189,7 @@ export interface Options {
     concurrency?: number;
     flowing?: boolean;
 }
-export interface Stats {
+export interface IFlowStats {
     delay: number;
     maxsize: number;
     queue_name: string;
@@ -163,11 +199,11 @@ export interface Stats {
     total_received: number;
     workers: number;
 }
-export interface Context<T, U = any> {
+export interface IContext<T, U = any> {
     response?: U;
     request: T;
     sent: Date;
     received: Date;
     queue: string;
 }
-export declare type Middleware<T, U> = (context: Context<T, U>, next: () => Promise<any>) => any;
+export declare type Middleware<T, U> = (context: IContext<T, U>, next: () => Promise<any>) => any;

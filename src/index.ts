@@ -9,48 +9,135 @@ redis.call('set', KEYS[1], ARGV[1]) return -1 end`;
 
 export class Flow {
   /**
+   * Currently processing [number] queues.
+   */
+  public readonly hasActiveQueues: number;
+  /**
    * Default timeout for async methods
    */
-  public readonly timeout: number;
+  public readonly hasTimeout: number;
   /**
-   * Max size for packed requests
+   * Max size for packed requests.
    */
-  public readonly maxsize: number;
+  public readonly hasMaxPacketSize: number;
+  /**
+   * Max concurring queues.
+   */
+  public readonly hasConcurrency: number;
 
   /**
-   * Max concurring queues. May be reconfigurred
+   * Dispatched if any errors occurr.
    */
-  public concurrency: number;
+  public readonly onError: Signal<any>;
+  /**
+   * Dispatched when flow is paused.
+   */
+  public readonly onPause: Signal<void>;
+  /**
+   * Dispatched when redis is connected.
+   */
+  public readonly onReady: Signal<void>;
+  /**
+   * Dispatched when flow is resumed.
+   */
+  public readonly onResume: Signal<void>;
+  /**
+   * Dispatched when redis connection is closing.
+   */
+  public readonly onQuit: Signal<void>;
 
   /**
-   * Silenced errors land here.
+   * Indicates that requests are currently being processed.
    */
-  public onError: Signal<Error>;
+  public readonly isActive: boolean;
+  /**
+   * Inidates that the instance is in a paused state.
+   */
+  public readonly isPaused: boolean;
+  /**
+   * Indicates that the instance is ready for use.
+   */
+  public readonly isReady: boolean;
 
-  private _implements: Map<string, MiddlewareArray<any, any>>;
-  private _responses: Map<string, (err?: any, value?: any) => void>;
-  private _handles: Map<string, (message?: string) => void>;
+  private __registered: Map<string, MiddlewareArray<any, any>>;
+  private __responses: Map<string, (err?: any, value?: any) => void>;
+  private __handles: Map<string, (message?: string) => any>;
 
-  private _active: Set<string>;
-  private _queue: string[];
+  private __active: Set<string>;
+  private __queue: string[];
 
-  private _redis: ExtendedRedis;
-  private _sub: IORedis.Redis;
+  private __redis: IRedis;
+  private __sub: IORedis.Redis;
 
-  private _ready?: Promise<void>;
-  private _pause?: boolean | (() => void);
+  private __concurrency: number;
+  private __ready: boolean;
+  private __readyPromise?: Promise<void>;
+  private __pause: boolean;
+  private __pausePromise?: Promise<void>;
 
-  constructor(options?: Options);
+  constructor(options?: IFlowOptions);
   constructor({
-    concurrency = 3,
+    concurrency = 1,
     flowing = false,
     maxsize = 2000,
     prefix: keyPrefix = 'rqm:',
     uri = 'redis://localhost:6379/0',
-    timeout = 5000,
-  }: Options = {}) {
-    const promise = Promise.all([
-      new Promise<ExtendedRedis>((resolve, reject) => {
+    timeout = 1000,
+  }: IFlowOptions = {}) {
+    Object.defineProperties(this, {
+      hasActiveQueues: {
+        get(this: Flow) {
+          return this.__active.size;
+        }
+      },
+      hasConcurrency: {
+        get(this: Flow) {
+          return this.__concurrency;
+        }
+      },
+      hasMaxPacketSize: {
+        value: maxsize,
+        writable: false,
+      },
+      hasTimeout: {
+        value: timeout > 0 ? timeout : 1000,
+        writable: false,
+      },
+      isActive: {
+        get(this: Flow) {
+          return Boolean(this.__active.size);
+        },
+      },
+      isPaused: {
+        get(this: Flow) {
+          return this.__pause;
+        },
+      },
+      onError: {
+        value: new Signal(),
+        writable: false,
+      },
+      onPause: {
+        value: new Signal(),
+        writable: false,
+      },
+      onReady: {
+        value: new Signal(),
+        writable: false,
+      },
+      onResume: {
+        value: new Signal(),
+        writable: false,
+      },
+    });
+    this.__concurrency = concurrency;
+    this.__pause = !flowing;
+    this.__queue = [];
+    this.__active = new Set();
+    this.__responses = new Map();
+    this.__registered = new Map();
+    this.__readyPromise = Promise.all([
+      new Promise<IRedis>((resolve, reject) => {
         const connection = new IORedis(uri, {keyPrefix});
         const ref = setTimeout(reject, timeout, new Error('Connection to '));
 
@@ -63,7 +150,7 @@ export class Flow {
         connection.once('connect', () => {
           clearTimeout(ref);
           connection.removeListener('error', reject);
-          resolve(connection as ExtendedRedis);
+          resolve(connection as IRedis);
         });
       }),
       new Promise<IORedis.Redis>((resolve, reject) => {
@@ -78,11 +165,17 @@ export class Flow {
         });
       }),
     ]).then(async([redis, sub]) => {
-      this._redis = redis;
-      this._sub = sub;
-      delete this._ready;
-
-      sub.on('message', (channel, message) => this._handles.get(channel)(message));
+      this.__redis = redis;
+      this.__sub = sub;
+      delete this.__readyPromise;
+      setImmediate(() => {
+        try {
+          this.onReady.dispatch(void 0);
+        } catch (err) {
+          this.onError.dispatch(err);
+        }
+      });
+      sub.on('message', (channel, message) => this.__handles.get(channel)(message));
 
       // Attach default handlers
       await this.attachMulti(
@@ -93,38 +186,17 @@ export class Flow {
         ['implemented', (message) => this.handleImplemented(message)],
       );
     });
-
-    this.maxsize = maxsize;
-    this.timeout = timeout;
-    this.onError = new Signal();
-
-    this._queue = [];
-    this._ready = promise;
-    this._pause = !flowing;
-    this._active = new Set();
-    this._responses = new Map();
-    this._implements = new Map();
   }
 
   /**
-   * Currently proccessing request queues
+   * Change max concurring queue processing.
+   * @param value New value
    */
-  get active(): boolean {
-    return Boolean(this._active.size);
-  }
-
-  /**
-   * Currently proccessing x request queues
-   */
-  get activeSize(): number {
-    return this._active.size;
-  }
-
-  /**
-   * Check if flowing mode is enabled.
-   */
-  get flowing(): boolean {
-    return !this._pause;
+  public concurrency(value: number): this {
+    if (typeof value === "number" && value >= 0) {
+      this.__concurrency = value;
+    }
+    return this;
   }
 
   /**
@@ -184,7 +256,7 @@ export class Flow {
       (handlers as MiddlewareArray<T, U>).created = Date.now();
       (handlers as MiddlewareArray<T, U>).received = 0;
 
-      this._implements.set(name, handlers as MiddlewareArray<T, U>);
+      this.__registered.set(name, handlers as MiddlewareArray<T, U>);
     }
 
     return this;
@@ -197,7 +269,7 @@ export class Flow {
    * @returns Unregister successful
    */
   public unregister(name: string): boolean {
-    return this._implements.delete(name);
+    return this.__registered.delete(name);
   }
 
   public push<T = void>(name: string): Promise<T>;
@@ -224,34 +296,34 @@ export class Flow {
       }
     }
 
-    if (message.length > this.maxsize) {
+    if (message.length > this.hasMaxPacketSize) {
       throw new Error('Packed message exceeds max size');
     }
 
     // Wait for connection if not ready
-    if (this._ready) {
-      await this._ready;
+    if (this.__readyPromise) {
+      await this.__readyPromise;
     }
 
     if ('number' !== typeof timeout) {
-      timeout = this.timeout > 0 ? this.timeout : 1000;
+      timeout = this.hasTimeout;
     }
 
-    await this._redis.pipeline()
+    await this.__redis.pipeline()
       .lpush(this.prefixQueue(name), message)
       .publish('request', name)
       .exec();
 
     // Will return undefined if timeout finished first
     const value = await Promise.race<U>([
-      new Promise<U>((resolve, reject) => this._responses.set(id, (err: any, val?: U) =>
+      new Promise<U>((resolve, reject) => this.__responses.set(id, (err: any, val?: U) =>
         err ? reject(err) : resolve(val))),
       // Timeout after x milliseconds
       wait(timeout),
     ]);
 
     // Delete callback
-    this._responses.delete(id);
+    this.__responses.delete(id);
 
     // We timed out
     if (!value && Date.now() >= date + timeout) {
@@ -268,23 +340,23 @@ export class Flow {
    * @returns Pop successful
    */
   public async pop(name: string): Promise<boolean> {
-    if (this.flowing) {
+    if (!this.__pause) {
       return false;
     }
 
-    if (this._implements.has(name)) {
+    if (this.__registered.has(name)) {
       return false;
     }
 
     // Wait for connection if not ready
-    if (this._ready) {
-      await this._ready;
+    if (this.__readyPromise) {
+      await this.__readyPromise;
     }
 
-    const data = await this._redis.rpop(this.prefixQueue(name));
+    const data = await this.__redis.rpop(this.prefixQueue(name));
 
     if (data) {
-      const queue = this._implements.get(name);
+      const queue = this.__registered.get(name);
 
       await this.parseQueueData(queue, data);
     }
@@ -300,25 +372,25 @@ export class Flow {
   public availableQueues(timeout: number): Promise<string[]>;
   public async availableQueues(timeout?: number): Promise<string[]> {
     // Wait for connection if not ready
-    if (this._ready) {
-      await this._ready;
+    if (this.__readyPromise) {
+      await this.__readyPromise;
     }
 
     if ('number' !== typeof timeout) {
-      timeout = this.timeout > 0 ? this.timeout : 10;
+      timeout = this.hasTimeout;
     }
 
     // Generate id for timeout period
     const id = generate(Date.now() + timeout);
 
     await Promise.all([
-      this._redis.publish('advertise', id),
+      this.__redis.publish('advertise', id),
       wait(timeout),
     ]);
 
     const prefixed = this.prefixId(id);
 
-    const [list]: [string[]] = await this._redis.multi()
+    const [[_, list]]: [[any, string[]]] = await this.__redis.multi()
       .smembers(prefixed)
       .del(prefixed)
       .exec()
@@ -331,16 +403,16 @@ export class Flow {
   public has(name: string, timeout: number): Promise<boolean>;
   public async has(queue: string, timeout?: number): Promise<boolean> {
     // Wait for connection if not ready
-    if (this._ready) {
-      await this._ready;
+    if (this.__readyPromise) {
+      await this.__readyPromise;
     }
 
-    if (this._implements.has(queue)) {
+    if (this.__registered.has(queue)) {
       return true;
     }
 
     if ('number' !== typeof timeout) {
-      timeout = this.timeout > 0 ? this.timeout : 1000;
+      timeout = this.hasTimeout;
     }
 
     // Generate id for timeout period
@@ -348,11 +420,11 @@ export class Flow {
 
     const [value = false] = await Promise.all([
       Promise.race([
-        new Promise<boolean>((resolve, reject) => this._responses.set(id, () =>
+        new Promise<boolean>((resolve, reject) => this.__responses.set(id, () =>
           resolve(true))),
         wait(timeout),
       ]),
-      this._redis.publish('implemented', `${queue};${id}`),
+      this.__redis.publish('implemented', `${queue};${id}`),
     ]);
 
     return value;
@@ -364,29 +436,29 @@ export class Flow {
    *
    * @param name
    */
-  public stats(name: string): Promise<Stats>;
-  public stats(name: string, timeout: number): Promise<Stats>;
-  public async stats(queue: string, timeout?: number): Promise<Stats> {
+  public stats(name: string): Promise<IFlowStats>;
+  public stats(name: string, timeout: number): Promise<IFlowStats>;
+  public async stats(queue: string, timeout?: number): Promise<IFlowStats> {
     // Wait for connection if not ready
-    if (this._ready) {
-      await this._ready;
+    if (this.__readyPromise) {
+      await this.__readyPromise;
     }
 
     if ('number' !== typeof timeout) {
-      timeout = this.timeout > 0 ? this.timeout : 1000;
+      timeout = this.hasTimeout;
     }
 
     await Promise.all([
-      this._redis.publish('report', `${queue};${Date.now() + timeout}`),
+      this.__redis.publish('report', `${queue};${Date.now() + timeout}`),
       wait(timeout),
     ]);
 
     const [
-      workers = 0,
-      total_received = 0,
-      created = -1,
-      in_queue = 0,
-    ]: [number, number, number, number, number] = await this._redis.multi()
+      [_1, workers = 0],
+      [_2, total_received = 0],
+      [_3, created = -1],
+      [_4, in_queue = 0],
+    ]: [[any, number], [any, number], [any, number], [any, number], [any, number]] = await this.__redis.multi()
       .get(this.prefixQueue(queue, 'coun'))
       .get(this.prefixQueue(queue, 'recv'))
       .get(this.prefixQueue(queue, 'crea'))
@@ -400,10 +472,10 @@ export class Flow {
     // Return stats if we found workers or queue is not empty
     if (workers || in_queue) {
       return {
-        delay: this.timeout,
+        delay: this.hasTimeout,
         first_created: created >= 0 ? new Date(created) : undefined,
         in_queue,
-        maxsize: this.maxsize,
+        maxsize: this.hasMaxPacketSize,
         queue_name: queue,
         total_received,
         total_sent: total_received + in_queue,
@@ -412,64 +484,89 @@ export class Flow {
     }
   }
 
+  public createQueue<T, U>(name: string) {
+    return new Queue(name, this);
+  }
+
   /**
    * Wait till instance is connected and ready for use.
    *
    * @returns Resolves when ready
    */
-  public ready(): Promise<void> {
-    if (!this._ready) {
-      return Promise.resolve();
+  public async ready(): Promise<void> {
+    if (this.__ready) {
+      return;
     }
 
-    return this._ready;
+    return this.__readyPromise;
   }
 
   /**
    * Pauses flow. Resolves when flow is fully paused.
    */
   public async pause(): Promise<void> {
-    if (this._pause) {
+    if (this.__pausePromise) {
+      return this.__pausePromise;
+    }
+
+    if (this.__pause) {
       return;
     }
 
-    if (this._ready || !this._active.size) {
-      this._pause = true;
+    this.__pause = true;
 
+    if (!this.__active.size) {
       return;
     }
 
     // Wait till all queues are stopped
-    return new Promise<void>((resolve) => this._pause = () => {
+    return this.__pausePromise = new Promise<void>((resolve) => this.onPause.addOnce(() => {
+      delete this.__pausePromise;
       resolve();
-      this._pause = true;
-    });
+    }));
   }
 
   /**
    * Resumes flow.
    */
   public async resume(): Promise<void> {
-    if (!this._pause) {
+    if (!this.__pause) {
       return;
     }
 
-    this._pause = false;
+    this.__pause = false;
 
     // Resume if stack is not empty
-    if (this._queue.length) {
-      this.handleRequest(false);
+    if (this.__queue.length) {
+      this.handleRequest();
     }
+
+    setImmediate(() => {
+      try {
+        this.onResume.dispatch(void 0);
+      } catch (err) {
+        this.onError.dispatch(err);
+      }
+    });
   }
 
   /**
    * Gracefully exit.
    */
   public async quit(): Promise<void> {
+    // Wait till requests are finished
+    await this.pause();
+    // Then close redis connections
     await Promise.all([
-      this._redis.quit(),
-      this._sub.quit(),
+      this.__redis.quit(),
+      this.__sub.quit(),
     ]);
+    // Inform third-parties through signal.
+    try {
+      this.onQuit.dispatch(void 0);
+    } catch (err) {
+      this.onError.dispatch(void 0);
+    }
   }
 
   /**
@@ -480,10 +577,10 @@ export class Flow {
    */
   public async publish(channel: string, message: string): Promise<boolean> {
     // Wait for connection if not ready
-    if (this._ready) {
-      await this._ready;
+    if (this.__readyPromise) {
+      await this.__readyPromise;
     }
-    return 0 < await this._redis.publish(channel, message);
+    return 0 < await this.__redis.publish(channel, message);
   }
 
   /**
@@ -499,18 +596,18 @@ export class Flow {
   private async attachMulti(...entries: Array<[string, (message: string) => any]>): Promise<boolean> {
     const handles = new Map(entries);
 
-    if (!this._handles) {
-      this._handles = handles;
+    if (!this.__handles) {
+      this.__handles = handles;
     } else {
-      handles.forEach((v, k) => this._handles.set(k, v));
+      handles.forEach((v, k) => this.__handles.set(k, v));
     }
 
     // Wait for connection if not ready
-    if (this._ready) {
-      await this._ready;
+    if (this.__readyPromise) {
+      await this.__readyPromise;
     }
 
-    return this._handles.size <= await this._sub.subscribe(...handles.keys());
+    return this.__handles.size <= await this.__sub.subscribe(...handles.keys());
   }
 
   private prefixQueue(queue: string): string;
@@ -528,59 +625,72 @@ export class Flow {
   /**
    * Process requests in an async series till stack is empty
    */
-  private async handleRequest<T, U>(handle: string | false): Promise<void> {
-    if (handle !== false) {
-      if (!this._implements.has(handle)) {
+  private async handleRequest<T, U>(handle?: string): Promise<void> {
+    if (handle !== undefined) {
+      if (!this.__registered.has(handle)) {
         return;
       }
 
-      if (this._active.has(handle)) {
+      if (this.__active.has(handle)) {
         return;
       }
 
-      if (!this._queue.includes(handle)) {
-        this._queue.push(handle);
+      if (!this.__queue.includes(handle)) {
+        this.__queue.push(handle);
       }
     }
 
-    if (this._pause) {
+    if (this.__pause) {
       return;
     }
 
-    if (this._active.size === this.concurrency) {
+    if (this.__active.size >= this.__concurrency) {
       return;
     }
 
-    let name = this._queue.shift();
+    let name = this.__queue.shift();
     while (name) {
-      this._active.add(name);
+      // We may have done some async work, so recheck value
+      if (this.__active.size >= this.__concurrency) {
+        this.__queue.unshift(name);
+        break;
+      }
+
+      this.__active.add(name);
 
       let data;
-      const queue = this._implements.get(name);
+      const queue = this.__registered.get(name);
       do {
-        data = await this._redis.rpop(this.prefixQueue(name));
+        data = await this.__redis.rpop(this.prefixQueue(name));
 
         if (data) {
           await this.parseQueueData<T, U>(queue, data);
         }
 
-        // We did some async work, so re-check pause state
-        if (this._pause) {
+        // We did some async work, so recheck pause state
+        if (this.__pause) {
+          this.__queue.unshift(name);
           break;
         }
       } while (data);
 
-      this._active.delete(name);
+      this.__active.delete(name);
 
-      if (this._pause) {
+      if (this.__pause) {
         break;
       }
 
-      name = this._queue.shift();
+      name = this.__queue.shift();
     }
 
-    if (!this._active.size && this._pause && 'function' === typeof this._pause) {
-      this._pause();
+    if (!this.__active.size) {
+      setImmediate(() => {
+        try {
+          this.onPause.dispatch(void 0);
+        } catch (err) {
+          this.onError.dispatch(err);
+        }
+      });
     }
   }
 
@@ -593,7 +703,7 @@ export class Flow {
     let payload = id;
     const sent = createFromHexString(id).getTimestamp();
     const request = body ? JSON.parse(body) : undefined;
-    const context: Context<T, U> = {
+    const context: IContext<T, U> = {
       queue: queue.name,
       received,
       request,
@@ -603,7 +713,7 @@ export class Flow {
 
     queue.received++;
 
-    const multi = this._redis.multi();
+    const multi = this.__redis.multi();
 
     try {
       await dispatch(0);
@@ -641,40 +751,41 @@ export class Flow {
     }
   }
 
-  private async handleResponse(payload: string) {
+  private handleResponse(payload: string) {
     // T is not a hexadecimal value, so we (can) use it as a boolean.
     const [id, error] = payload.split(';');
 
-    if (!this._responses.has(id)) {
+    if (!this.__responses.has(id)) {
       return;
     }
 
     // Retrive handler
-    const handler = this._responses.get(id);
-    this._responses.delete(id);
+    const handler = this.__responses.get(id);
+    this.__responses.delete(id);
 
     // Try parse message
     if (error !== undefined) {
       if (!error.length) {
-        handler();
+        setImmediate(handler);
       } else {
         const err = new Error(error);
-
-        handler(err);
+        setImmediate(() => handler(err));
       }
     } else {
-      try {
-        const [[, message]]: [[null, string]] = await this._redis.multi()
-          .get(this.prefixId(id))
-          .del(this.prefixId(id))
-          .exec()
-        ;
-        const data = JSON.parse(message);
+      setImmediate(async() => {
+        try {
+          const [[, message]]: [[null, string]] = await this.__redis.multi()
+            .get(this.prefixId(id))
+            .del(this.prefixId(id))
+            .exec()
+          ;
+          const data = JSON.parse(message);
 
-        handler(null, data);
-      } catch (err) {
-        handler(err);
-      }
+          handler(null, data);
+        } catch (err) {
+          handler(err);
+        }
+      });
     }
   }
 
@@ -686,7 +797,7 @@ export class Flow {
       return;
     }
 
-    await this._redis.sadd(id, ...this._implements.keys());
+    await this.__redis.sadd(id, ...this.__registered.keys());
   }
 
   private async handleStats(payload: string = '') {
@@ -697,9 +808,9 @@ export class Flow {
       return;
     }
 
-    const queue = this._implements.get(name);
+    const queue = this.__registered.get(name);
 
-    (this._redis.multi() as ExtendedPipeline)
+    (this.__redis.multi() as IPipeline)
       .setlt(this.prefixQueue(name, 'crea'), queue.created)
       .incrby(this.prefixQueue(name, 'recv'), queue.received)
       .incr(this.prefixQueue(name, 'coun'))
@@ -714,13 +825,39 @@ export class Flow {
       return;
     }
 
-    if (this._implements.has(name)) {
-      this._redis.publish("response", `${id};`);
+    if (this.__registered.has(name)) {
+      this.__redis.publish("response", `${id};`);
     }
   }
 }
 
-export interface Options {
+export class Queue<T, U> {
+  public readonly name: string;
+  public readonly parent: Flow;
+
+  constructor(name: string, parent: Flow) {
+    Object.defineProperties(this, {
+      name: {
+        value: name,
+        writable: false,
+      },
+      parent: {
+        value: parent,
+        writable: false,
+      },
+    });
+  }
+
+  public async pop(): Promise<boolean> {
+    return this.parent.pop(this.name);
+  }
+
+  public async push(value?: T): Promise<U> {
+    return this.parent.push<T, U>(this.name, value);
+  }
+}
+
+export interface IFlowOptions {
   uri?: string;
   prefix?: string;
   maxsize?: number;
@@ -729,7 +866,7 @@ export interface Options {
   flowing?: boolean;
 }
 
-export interface Stats {
+export interface IFlowStats {
   delay: number;
   maxsize: number;
   queue_name: string;
@@ -740,7 +877,7 @@ export interface Stats {
   workers: number;
 }
 
-export interface Context<T, U = any> {
+export interface IContext<T, U = any> {
   // Response body
   response?: U;
   // Request body
@@ -753,7 +890,7 @@ export interface Context<T, U = any> {
   queue: string;
 }
 
-export type Middleware<T, U> = (context: Context<T, U>, next: () => Promise<any>) => any;
+export type Middleware<T, U> = (context: IContext<T, U>, next: () => Promise<any>) => any;
 
 interface MiddlewareArray<T, U> extends Array<Middleware<T, U>> {
   name: string;
@@ -762,12 +899,12 @@ interface MiddlewareArray<T, U> extends Array<Middleware<T, U>> {
   created: number;
 }
 
-interface ExtendedRedis extends IORedis.Redis {
+interface IRedis extends IORedis.Redis {
   setlt(key: string, value: number): Promise<number>;
   rpopBuffer(key: string): Promise<Buffer | null>;
 }
 
-interface ExtendedPipeline extends IORedis.Pipeline {
+interface IPipeline extends IORedis.Pipeline {
   setlt(key: string, value: number): this;
 }
 
