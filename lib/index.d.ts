@@ -101,8 +101,8 @@ export declare class Flow {
      */
     unregister(name: string): boolean;
     push<T = void>(name: string): Promise<T>;
-    push<T = any, U = void>(name: string, pack: T): Promise<U>;
-    push<T = any, U = void>(name: string, pack: T, timeout: number): Promise<U>;
+    push<T = void, U = any>(name: string, pack?: U): Promise<T>;
+    push<T = void, U = any>(name: string, pack: U, timeout: number): Promise<T>;
     /**
      * Pops queue if flow is paused.
      *
@@ -179,7 +179,7 @@ export declare class Queue<T, U> {
     readonly parent: Flow;
     constructor(name: string, parent: Flow);
     pop(): Promise<boolean>;
-    push(value?: T): Promise<U>;
+    push(value?: U): Promise<T>;
 }
 export interface IFlowOptions {
     uri?: string;

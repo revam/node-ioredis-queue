@@ -273,9 +273,9 @@ export class Flow {
   }
 
   public push<T = void>(name: string): Promise<T>;
-  public push<T = any, U = void>(name: string, pack: T): Promise<U>;
-  public push<T = any, U = void>(name: string, pack: T, timeout: number): Promise<U>;
-  public async push<T, U>(name: string, pack?: T, timeout?: number): Promise<U> {
+  public push<T = void, U = any>(name: string, pack?: U): Promise<T>;
+  public push<T = void, U = any>(name: string, pack: U, timeout: number): Promise<T>;
+  public async push<T, U>(name: string, pack?: U, timeout?: number): Promise<T> {
     if (!name) {
       throw new Error('Name cannot be empty');
     }
@@ -315,8 +315,8 @@ export class Flow {
       .exec();
 
     // Will return undefined if timeout finished first
-    const value = await Promise.race<U>([
-      new Promise<U>((resolve, reject) => this.__responses.set(id, (err: any, val?: U) =>
+    const value = await Promise.race<T>([
+      new Promise<T>((resolve, reject) => this.__responses.set(id, (err: any, val?: T) =>
         err ? reject(err) : resolve(val))),
       // Timeout after x milliseconds
       wait(timeout),
@@ -852,7 +852,7 @@ export class Queue<T, U> {
     return this.parent.pop(this.name);
   }
 
-  public async push(value?: T): Promise<U> {
+  public async push(value?: U): Promise<T> {
     return this.parent.push<T, U>(this.name, value);
   }
 }
